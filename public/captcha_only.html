@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>腾讯验证码</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    min-height:100vh;
+    display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,#e0ecff 0%,#f5f0ff 50%,#fce4ec 100%);
+  }
+  .card{
+    background:rgba(255,255,255,.85);
+    backdrop-filter:blur(20px);
+    border-radius:20px;
+    padding:40px;
+    width:100%;max-width:460px;
+    box-shadow:0 8px 32px rgba(100,120,180,.12);
+  }
+  h1{font-size:24px;text-align:center;margin-bottom:20px}
+  .form-group{margin-bottom:16px}
+  label{font-size:14px;color:#4a5568;display:block;margin-bottom:6px}
+  input{
+    width:100%;padding:12px 14px;font-size:15px;
+    border:1.5px solid #e2e8f0;border-radius:10px;
+    background:#f7f9fc;outline:none;transition:.25s;
+  }
+  input:focus{border-color:#6c8cff;background:#fff;box-shadow:0 0 0 3px rgba(108,140,255,.12)}
+  button{
+    width:100%;padding:12px;font-size:15px;font-weight:600;color:#fff;
+    background:linear-gradient(135deg,#6c8cff 0%,#a78bfa 100%);
+    border:none;border-radius:10px;cursor:pointer;transition:.3s;margin-top:8px;
+  }
+  button:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(108,140,255,.35)}
+  #captchaBox{margin-top:20px;display:none}
+  #userInfo{margin-top:20px;display:none}
+  .error{color:#e53e3e;margin-top:12px}
+  /* 验证结果区域（位于开始验证按钮下方） */
+  #verifyResult{
+    margin-top: 16px;
+    font-weight: 500;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>腾讯安全验证码</h1>
+
+  <!-- 1️⃣ 输入 eventid ---------------------------------------------------- -->
+  <div class="form-group">
+    <label for="eventId">Event ID</label>
+    <input type="text" id="eventId" placeholder="如：gz_tx_event_xxx">
+  </div>
+  <button id="fetchInfoBtn">获取验证码信息</button>
+  <div id="infoErr" class="error"></div>
+
+  <!-- 2️⃣ 腾讯验证码容器（由脚本动态显示） ----------------------------- -->
+  <div id="captchaBox"></div>
+
+  <!-- 3️⃣ 补全业务所需的 userid / mid / dfid --------------------------- -->
+  <div id="userInfo">
+    <div class="form-group">
+      <label for="userid">userid</label>
+      <input type="text" id="userid">
+    </div>
+      <div class="form-group">
+      <label for="dfid">dfid</label>
+      <input type="text" id="dfid">
+    </div>
+    <div class="form-group">
+      <label for="d">mid</label>
+      <input type="text" id="mid">
+    </div>
+
+    <button id="submitBtn">开始验证</button>
+    <!-- 验证成功/失败的结果显示在开始验证按钮下方 -->
+    <div id="verifyResult" class="error"></div>
+  </div>
+
+  <!-- 接口返回的 JSON 显示区域已移除 -->
+  <!-- <pre id="resultBox"></pre>  已删除 -->
+
+  <!-- 验证失败统一提示（保留原verifyFail区域，但主结果已移至按钮下方） -->
+  <div id="verifyFail" class="error"></div>
+</div>
+
+<script>
+    alert('警告：该验证只适用于调用部分接口触发验证，账号密码登录不建议使用该验证！');
+/*================================================================
+  辅助函数
+================================================================*/
+function loadScript(url, cb){
+  const s=document.createElement('script');
+  s.src=url;
+  s.onload=()=>cb();
+  s.onerror=()=>cb(new Error('load failed'));
+  document.head.appendChild(s);
+}
+
+/*================================================================
+  DOM 引用
+================================================================*/
+const eventIdInput   = document.getElementById('eventId');
+const fetchInfoBtn   = document.getElementById('fetchInfoBtn');
+const infoErrDiv     = document.getElementById('infoErr');
+
+const captchaBox    = document.getElementById('captchaBox');
+const verifyFailDiv = document.getElementById('verifyFail');
+
+const userInfoDiv   = document.getElementById('userInfo');
+const useridInput   = document.getElementById('userid');
+const midInput      = document.getElementById('mid');
+const dfidInput     = document.getElementById('dfid');
+const submitBtn     = document.getElementById('submitBtn');
+
+// 验证成功/失败专用显示区域（位于开始验证按钮正下方）
+const verifyResultDiv = document.getElementById('verifyResult');
+
+/*================================================================
+  全局状态
+================================================================*/
+let currentEventId = '';
+let verifyInfo = null;           // {txappid, v_type, sessionid …}
+let captchaTicket = '';
+let captchaRandStr = '';
+
+/*================================================================
+  1️⃣ 获取验证码信息（仅处理 v_type===23，即腾讯验证码）
+================================================================*/
+fetchInfoBtn.addEventListener('click', async () => {
+  // 清理旧数据
+  infoErrDiv.textContent = '';
+  verifyFailDiv.textContent = '';
+  if (verifyResultDiv) verifyResultDiv.textContent = '';   // 清空按钮下方的结果区域
+  captchaBox.style.display = 'none';
+  userInfoDiv.style.display = 'none';
+  captchaTicket = '';
+  captchaRandStr = '';
+
+  currentEventId = eventIdInput.value.trim();
+  if (!currentEventId) {
+    infoErrDiv.textContent = '请先填写 Event ID';
+    return;
+  }
+
+  try {
+    const resp = await fetch(`/get/verify/info?eventid=${encodeURIComponent(currentEventId)}`);
+    const json = await resp.json();
+
+    verifyInfo = json.data;
+    if (Number(verifyInfo.v_type) !== 23) {
+      throw new Error(`仅支持腾讯验证码（v_type=23），返回的 v_type 为 ${verifyInfo.v_type}`);
+    }
+
+    // 加载并弹出腾讯验证码
+    loadTencentCaptcha(verifyInfo.txappid);
+  } catch (e) {
+    infoErrDiv.textContent = '获取验证码信息失败：' + e.message;
+    console.error(e);
+  }
+});
+
+/*================================================================
+  2️⃣ 加载并弹出腾讯验证码
+================================================================*/
+function loadTencentCaptcha(appId){
+  loadScript('https://turing.captcha.qcloud.com/TCaptcha.js', (err)=>{
+    if (err){
+      infoErrDiv.textContent = '加载腾讯验证码 SDK 失败';
+      return;
+    }
+    if (typeof TencentCaptcha === 'undefined'){
+      infoErrDiv.textContent = 'TencentCaptcha 对象未定义';
+      return;
+    }
+
+    const captcha = new TencentCaptcha(appId, (res)=>{
+      // ret===0 表示验证通过
+      if (res.ret === 0){
+        captchaTicket = res.ticket;
+        captchaRandStr = res.randstr;
+        // 验证成功后显示业务信息输入框
+        captchaBox.style.display = 'none';
+        userInfoDiv.style.display = 'block';
+      }else{
+        // 用户关闭或验证失败
+        verifyFailDiv.textContent = `验证码验证失败（ret=${res.ret}）`;
+        console.warn('Captcha failed', res);
+      }
+    },{
+      type:'',                // 使用后台默认类型
+      showHeader:false,
+      ready:()=>{}           // 如需 loading 可自行实现
+    });
+
+    // 直接弹出
+    captcha.show();
+    captchaBox.style.display = 'block';
+  });
+}
+
+/*================================================================
+  3️⃣ 提交至后端 /sidedt（GET 示例，若要 POST 只改 method 与 body）
+     验证成功/失败的结果显示在「开始验证」按钮下方（verifyResultDiv）
+================================================================*/
+submitBtn.addEventListener('click', async ()=>{
+  verifyFailDiv.textContent = '';
+  if (verifyResultDiv) verifyResultDiv.textContent = '';   // 每次点击先清空之前的验证结果
+
+  const userid = useridInput.value.trim();
+  const dfid   = dfidInput.value.trim();
+  const mid    = midInput.value.trim();
+
+  if (!userid || !mid || !dfid){
+    verifyFailDiv.textContent = '请完整填写 userid、mid、dfid';
+    return;
+  }
+
+  // 组装 verifycode（腾讯验证码专用前缀）
+  const verifycode = 'KGCodeTX|' + JSON.stringify({
+    ticket : captchaTicket,
+    randstr: captchaRandStr,
+    txappid: verifyInfo.txappid
+  });
+
+  // ---------- GET 方式调用 /sidedt ----------
+let sid = '', edt = '';   // 先声明
+  // 第一步
+  const url = `/sidedtonly?userid=${encodeURIComponent(userid)}&mid=${encodeURIComponent(mid)}&dfid=${encodeURIComponent(dfid)}`;
+  try {
+    const resp = await fetch(url, {method:'GET'});
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    const json = await resp.json();
+    
+    // 增加对 json.data 的空值检查
+    if (!json || !json.data) {
+      throw new Error('接口返回数据格式异常');
+    }
+    
+    sid = json.data.sid;
+    edt = json.data.edt;
+  } catch(e) {
+    /* 处理错误并直接返回 */
+    verifyFailDiv.textContent = '调用接口失败：' + e.message;
+    return;
+  }
+  // 第二步（使用上面取得的 sid、edt）
+  // 添加判断：如果 sid 或 edt 为空，则不继续执行
+  if (!sid || !edt) {
+    verifyFailDiv.textContent = '获取 sid/edt 失败，返回数据为空';
+    return;
+  }
+  const verifyurl = `/verify/user/info?eventid=${encodeURIComponent(currentEventId)}&v_type=23&verifycode=${encodeURIComponent(verifycode)}&sid=${encodeURIComponent(sid)}&edt=${encodeURIComponent(edt)}`;
+try {
+    const resp = await fetch(verifyurl, {method:'GET'});
+    if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+    const result = await resp.json();  // 解析响应
+    
+    // 验证成功/失败的结果统一显示在「开始验证」按钮下方（verifyResultDiv）
+    if (typeof result.data?.codeDesc === 'string' &&
+        result.data.codeDesc.toLowerCase() === 'success') {
+        console.log('验证成功');
+        if (verifyResultDiv) {
+            verifyResultDiv.textContent = '验证成功：' + result.data?.codeDesc;
+            verifyResultDiv.style.color = '#2b7e3a';   // 成功绿色
+        }
+    } else {
+        if (verifyResultDiv) {
+            verifyResultDiv.textContent = '验证失败：' + (result.data?.codeDesc || '未知错误');
+            verifyResultDiv.style.color = '#e53e3e';   // 失败红色
+        }
+    }
+
+} catch(e) {
+    verifyFailDiv.textContent = '验证失败：' + e.message;
+    console.error(e);
+}
+
+});
+
+</script>
+</body>
+</html>
